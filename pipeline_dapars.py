@@ -151,7 +151,7 @@ def connect():
 
 # -----------------------------------------------------------------
 @transform(os.path.join(PARAMS["annotations_dir"],
-                        PARAMS_ANNOTATIONS["interface_geneset_all_gtf"]),
+                        PARAMS["annotations_interface_geneset_all_gtf"]),
            regex(".+"),
            "geneset.bed")
 def getGenesetBed12(infile, outfile):
@@ -194,7 +194,7 @@ def getDaParsGeneset(infiles, outfile):
 
 # -----------------------------------------------------------------
 @transform("*.bam", suffix("*.bam"), ".bw")
-def bam_to_bedgraph(infile, outfile):
+def bam_to_bedGraph(infile, outfile):
     '''Convert alignments into depth bedGraphs '''
 
     genome_file = os.path.join(PARAMS['annotations_dir'],
