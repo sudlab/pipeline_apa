@@ -99,7 +99,8 @@ import os
 import sqlite3
 import CGAT.Experiment as E
 import CGATPipelines.Pipeline as P
-
+from CGAT import IOTools
+from CGAT import Database as DUtils
 # load options from the config file
 PARAMS = P.getParameters(
     ["%s/pipeline.ini" % os.path.splitext(__file__)[0],
@@ -139,9 +140,12 @@ def connect():
     Returns an sqlite3 database handle.
     '''
 
+    print PARAMS["database_name"]
+    print PARAMS["annotations_database"]
     dbh = sqlite3.connect(PARAMS["database_name"])
     statement = '''ATTACH DATABASE '%s' as annotations''' % (
-        PARAMS["annotations_database"])
+        os.path.join(PARAMS["annotations_dir"],
+                     PARAMS["annotations_database"]))
     cc = dbh.cursor()
     cc.execute(statement)
     cc.close()
@@ -193,12 +197,12 @@ def getDaParsGeneset(infiles, outfile):
     P.run()
 
 # -----------------------------------------------------------------
-@transform("*.bam", suffix("*.bam"), ".bw")
+@transform("*.bam", suffix(".bam"), ".bedGraph")
 def bam_to_bedGraph(infile, outfile):
     '''Convert alignments into depth bedGraphs '''
 
     genome_file = os.path.join(PARAMS['annotations_dir'],
-                               PARAMS['annotations_contigs_tsv'])
+                               PARAMS['annotations_interface_contigs_tsv'])
 
     statement = ''' genomeCoverageBed -split -bg -ibam %(infile)s 
                                       -g %(genome_file)s > %(outfile)s 2> %(outfile)s.log;
@@ -208,7 +212,7 @@ def bam_to_bedGraph(infile, outfile):
 
 
 # -----------------------------------------------------------------
-def generate_config(infiles, outfile):
+def generate_config(infiles, utrs, outfile):
     '''Generate DaPars config from template. The following parameters are 
     required in the ini:
 
@@ -228,39 +232,45 @@ def generate_config(infiles, outfile):
     condition1_files = ",".join([os.path.abspath(f) for f in condition1_files])
     condition2_files = ",".join([os.path.abspath(f) for f in condition2_files])
 
-    dapars_outfile = os.path.join(P.snip(".dapars_config.txt", outfile),
+    dapars_outfile = os.path.join(P.snip(outfile, ".dapars_config.txt"),
                                   "dapars_out.tsv")
     outdir = os.path.dirname(os.path.abspath(dapars_outfile))
     dapars_outfile = os.path.basename(dapars_outfile)
 
     local_params = PARAMS.copy()
-    local_params.update(locals)
+    local_params.update(locals())
+
+    config = config_template % local_params
 
     with IOTools.openFile(outfile, "w") as outf:
-        outf.write(contig_template % local_params)
+        outf.write(config)
 
 
 if not os.path.exists("design.tsv"):
 
-    @follows("dapars_out.dir")
+    @follows(mkdir("dapars_out.dir"))
     @collate(bam_to_bedGraph,
-             formatter("(?P<cell>.+)-(?P<condition>(?!WT).*)-(?P<replicate>.+).bedGraph"),
-             add_inputs("{cell[0]}-WT-*.bedGraph"),
-             r"dapars_out.dir/{cell[0]}-{condition[0]}.dapars_config.txt")
+             regex("(.+)-((?!Control).+)-(.+).bedGraph"),
+             add_inputs(r"\1-Control-\3.bedGraph", getDaParsGeneset),
+             r"dapars_out.dir/\1-\2.dapars_config.txt")
     def generate_dapars_config(infiles, outfile):
-        generate_config(infiles, outfile)
+
+        condition1_files, condition2_files, utrs = zip(*infiles)
+        generate_config([condition1_files, condition2_files], utrs[0], outfile)
 
 else:
-    
+
+    @follows(mkdir("dapars_out.dir"))
     @subdivide("design.tsv",
                formatter(),
-               add_inputs(bam_to_bedGraph),
-               ["dapars_out.dir/%s.dapars_config.txt" % line.split()[0] 
+               add_inputs(bam_to_bedGraph, getDaParsGeneset,),
+               ["dapars_out.dir/%s.dapars_config.txt" % line.split()[0]
                 for line in IOTools.openFile("design.tsv")
                 if not line.startswith("#")])
     def generate_dapars_config(infiles, outfile):
 
-        bedgraphs = infiles[1:]
+        bedgraphs = infiles[1:-1]
+        utrs = infiles[-1]
 
         comparisons = [line.split() for line in IOTools.openFile("design.tsv")
                        if not line.startswith("#")]
@@ -268,19 +278,46 @@ else:
         for name, pat1, pat2 in comparisons:
             condition1_files = [f for f in bedgraphs if re.match(f, pat1)]
             condition2_files = [f for f in bedgraphs if re.match(f, pat2)]
-            generate_config([condition1_files, condition2_files], outfile)
+            generate_config([condition1_files, condition2_files], utrs, outfile)
 
 
  # -----------------------------------------------------------------
 @transform(generate_dapars_config,
            regex(".+/(.+).dapars_config.txt"),
-           r"dapars_out.dir/\1/dapars_out.tsv")
+           r"dapars_out.dir/\1/dapars_out.tsv_All_Prediction_Results.txt")
 def run_DaPars(infile, outfile):
 
+    job_memory = "6G"
     statement = '''DaPars_main.py %(infile)s > %(infile)s.log'''
     P.run()   
     
-        
+
+# -----------------------------------------------------------------
+@merge(run_DaPars, "dapars.load")
+def loadDapars(infiles, outfile):
+    '''Munge the DaPars output to seperate transcript and gene_ids,
+    and load into database'''
+
+    infiles = " ".join(infiles)
+
+    statement='''python %(scriptsdir)s/combine_tables.py
+                   --cat=track
+                   --use-file-prefix
+                   --regex-filename='dapars_out.dir/(.+)/dapars_out'
+                   %(infiles)s -L %(outfile)s
+            |   sed 's/[|]/\\t/g'
+            |   sed '1!b;s/Gene/transcript_id\\tgene_id\\tchrom\\tstrand/'
+            |   %(load_statement)s
+            > %(outfile)s'''
+
+
+    load_statement=P.build_load_statement(
+        P.toTable(outfile),
+        options = "-i track -i gene_id -i transcript_id")
+
+    P.run()
+
+
 # -----------------------------------------------------------------            
 @follows(run_DaPars)
 def full():
