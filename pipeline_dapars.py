@@ -152,10 +152,60 @@ def connect():
 
     return dbh
 
+# -----------------------------------------------------------------
+@follows(mkdir("geneset.dir"))
+@transform("*.bam", formatter(),
+           add_inputs(os.path.join(
+               PARAMS["annotations_dir"],
+               PARAMS["annotations_interface_geneset_all_gtf"])),
+           "geneset.dir/{basename[0]}.gtf.gz")
+def assembleWithStringTie(infiles, outfile):
+
+    infile, reference = infiles
+
+    job_threads = PARAMS["stringtie_threads"]
+    job_memory = PARAMS["stringtie_memory"]
+
+    statement = '''stringtie %(infile)s
+                           -p %(stringtie_threads)s
+                           -G <(zcat %(reference)s)
+                           %(stringtie_options)s
+                           2> %(outfile)s.log
+                   | gzip > %(outfile)s '''
+
+    P.run()
+
 
 # -----------------------------------------------------------------
-@transform(os.path.join(PARAMS["annotations_dir"],
-                        PARAMS["annotations_interface_geneset_all_gtf"]),
+@merge([assembleWithStringTie,
+        add_inputs(os.path.join(
+               PARAMS["annotations_dir"],
+               PARAMS["annotations_interface_geneset_all_gtf"]))],
+       "geneset.dir/agg-agg-agg.gtf.gz")
+def mergeAllAssemblies(infiles, outfile):
+
+    infiles = ["<(zcat %s)" % infile for infile in infiles]
+    infiles, reference = infiles[:-1], infiles[-1]
+
+    job_threads = PARAMS["stringtie_merge_threads"]
+
+    infiles = " ".join(infiles)
+
+    statement = '''stringtie --merge
+                             -G %(reference)s
+                             -p %(stringtie_merge_threads)s
+                             %(stringtie_merge_options)s
+                             %(infiles)s
+                            2> %(outfile)s.log
+                   | python %(scriptsdir)s/gtf2gtf.py --method=sort
+                           --sort-order=gene+transcript
+                            -S %(outfile)s -L %(outfile)s.log'''
+
+    P.run() 
+
+
+# -----------------------------------------------------------------
+@transform(mergeAllAssemblies,
            regex(".+"),
            "geneset.bed")
 def getGenesetBed12(infile, outfile):
@@ -174,12 +224,19 @@ def getGenesetBed12(infile, outfile):
 @originate("transcripts_to_genes.txt")
 def generateDaParsTranscriptsToGenes(outfile):
 
-    statement = '''SELECT DISTINCT transcript_id, gene_id
-                   FROM transcript_info'''
+    import CGAT.GTF as GTF
 
-    data = DUtils.fetch_DataFrame(statement, connect())
+    outlines = []
 
-    data.to_csv(outfile, header = False, index = False, sep = "\t")
+    for transcript in GTF.transcript_iterator(
+            GTF.iterator(IOTools.openFile(infile))):
+        outlines.append([transcript[0].gene_id,
+                         transcript[0].transcript_id])
+
+    outlines = list(set(outlines))
+
+    IOTools.writeLines(outfile, outlines,
+                       header=["gene_id", "transcript_id"])
 
 
 # -----------------------------------------------------------------
@@ -281,7 +338,7 @@ else:
             generate_config([condition1_files, condition2_files], utrs, outfile)
 
 
- # -----------------------------------------------------------------
+# -----------------------------------------------------------------
 @transform(generate_dapars_config,
            regex(".+/(.+).dapars_config.txt"),
            r"dapars_out.dir/\1/dapars_out.tsv_All_Prediction_Results.txt")
@@ -319,7 +376,110 @@ def loadDapars(infiles, outfile):
 
 
 # -----------------------------------------------------------------            
-@follows(run_DaPars)
+# Alternate 3' exon analysis
+# -----------------------------------------------------------------            
+@follows(mkdir("alt_utr_analysis.dir"))
+@transform(os.path.join(
+               PARAMS["annotations_dir"],
+               PARAMS["annotations_interface_geneset_all_gtf"]),
+           formatter(),
+           "alt_utr_analysis.dir/transcript_chunks")
+def get_transcript_chunks(infile, outfile):
+    '''Turn the transcript models into 'chunks'. That is each
+    chunks non-overalapping part of an exon or intron that may or may not be
+    included in a transcript'''
+
+    statement = '''python %(scriptsdir)s/gtf2gtf.py --method=
+                           -I %(infile)s
+                           -L %(outfile)s.log
+                 | bedtools intersect -u -a stdin 
+                          -b <(zcat %(infile)s | awk '$3=="exon"')
+                 | gzip > %(outfile)s'''
+
+    P.run()
+
+# -----------------------------------------------------------------
+if os.path.exists("design.tsv"):
+    @follows(mkdir("alt_utr_analysis.dir"))
+    @split("design.tsv", "alt_utr_anlysis.dir/*.design.tsv")
+    def generate_dexseq_design_files(infile, outfiles):
+        '''take the design specification for the pipeline and convert 
+        into dexseq design matricies'''
+
+        bamfiles = glob.glob("*.bam")
+        bamfiles = [P.snip(os.path.basename(f), ".bam") for f in bamfiles]
+        comparisons = [line.split() for line in IOTools.openFile("design.tsv")
+                       if not line.startswith("#")]
+
+        
+        for name, pat1, pat2 in comparisons:
+            condition1_files = [(f, "test") for f in bamfiles
+                                if re.match(f, pat1)]
+            condition2_files = [(f, "control") for f in bamfiles
+                                if re.match(f, pat2)]
+            outlines = ["\t".join(l)
+                        for l in condition1_files + condition2_files]
+            IOTools.writeLines("alt_utr_anlysis.dir/%s.design.tsv" % name,
+                               outlines)
+
+else:
+
+    @follows(mkdir("alt_utr_analysis.dir"))
+    @collate("*.bam",
+             regex("(.+)-((?!Control).+)-(.+).bam"),
+             add_inputs(r"\1-Control-\3.bam"),
+             r"dapars_out.dir/\1-\2.dapars_config.txt")
+    def generate_dapars_config(infiles, outfile):
+
+        track = os.path.basename(infiles[0][0]).split("-")[0]
+        files = [P.snip(os.path.basename(f), ".bam")
+                 for p in infiles for f in p]
+        files = [(f, f.split("-")[0]) for f in files]
+        outlines = ["\t".join(l) for l in files]
+        IOTools.writeLines("alt_utr_analysis.dir/%s.design.tsv" % track,
+                           outlines)
+
+
+# -----------------------------------------------------------------
+@transform("*.bam", formatter(),
+           add_inputs(get_transcript_chunks),
+           "alt_utr_analysis.dir/{basename[0]}.tsv")
+def count_chunks(infiles, outfile):
+
+    gtffile = infiles[-1]
+    bamfile = infiles[:-1]
+
+    job_threads = 2
+    statement = '''featureCounts -f -O -a -T 2 --primary -p -B -C
+                                <(zcat %(gtffile)s)
+                                 %(bamfile)s
+                                -o %(outfile)s '''
+    P.run()
+
+
+# -----------------------------------------------------------------
+@merge(count_chunks,
+       "alt_utr_analysis.dir/chunk_counts.tsv.gz")
+def merge_chunk_counts(infiles, outfile):
+
+    infiles = " ".join(infiles)
+
+    statement=''' python %(scriptsdir)s/combine_tables.py
+                         -c 1,2,3,4,5,6
+                         -k 7
+                         --regex-filename='(.+).tsv'
+                         --use-file-prefix
+                         --merge-overlapping
+                         %(infiles)s
+                         -L %(outfile)s.log
+               | gzip > %(outfile)s '''
+
+    P.run()
+
+
+# -----------------------------------------------------------------
+
+@follows(loadDapars)
 def full():
     pass
 
