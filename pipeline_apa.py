@@ -99,8 +99,11 @@ import os
 import sqlite3
 import CGAT.Experiment as E
 import CGATPipelines.Pipeline as P
+from CGATPipelines import PipelineRnaseq
 from CGAT import IOTools
 from CGAT import Database as DUtils
+from CGAT import GTF
+
 # load options from the config file
 PARAMS = P.getParameters(
     ["%s/pipeline.ini" % os.path.splitext(__file__)[0],
@@ -375,6 +378,12 @@ def loadDapars(infiles, outfile):
     P.run()
 
 
+# ----------------------------------------------------------------
+@follows(loadDapars)
+def dapars():
+    pass
+
+
 # -----------------------------------------------------------------            
 # Alternate 3' exon analysis
 # -----------------------------------------------------------------            
@@ -383,20 +392,91 @@ def loadDapars(infiles, outfile):
                PARAMS["annotations_dir"],
                PARAMS["annotations_interface_geneset_all_gtf"]),
            formatter(),
-           "alt_utr_analysis.dir/transcript_chunks")
+           "geneset.dir/transcript_chunks.gtf.gz")
 def get_transcript_chunks(infile, outfile):
     '''Turn the transcript models into 'chunks'. That is each
     chunks non-overalapping part of an exon or intron that may or may not be
     included in a transcript'''
 
-    statement = '''python %(scriptsdir)s/gtf2gtf.py --method=
+    statement = '''python %(scriptsdir)s/gtf2gtf.py 
+                          --method=genes-to-unique-chunks
                            -I %(infile)s
                            -L %(outfile)s.log
-                 | bedtools intersect -u -a stdin 
+                 | bedtools intersect -u -a stdin  -s
                           -b <(zcat %(infile)s | awk '$3=="exon"')
                  | gzip > %(outfile)s'''
 
     P.run()
+
+
+# -----------------------------------------------------------------
+@transform(get_transcript_chunks, formatter(),
+           "geneset.dir/filtered_{basename[0]}.gz")
+def filter_overlapping_genes(infile, outfile):
+    '''Filter out exons that overlapp with exons from another 
+    gene'''
+
+
+    tmp1=P.getTempFilename()
+    tmp2=P.getTempFilename(shared=True)
+
+    # the first command in the statment trancates exons that overlap
+    # on oppsite strands. The second exons that overlap on the same
+    # strand.  the first part of the second command identifies exons
+    # that overlap on the same strand, the second part removes them
+    # from the geneset.
+    statement = ''' bedtools subtract -a %(infile)s -b %(infile)s -S > %(tmp1)s;
+
+                    checkpoint;
+
+                    bedtools merge -i <( sort -k1,1 -k4,4n %(tmp1)s)
+                                   -c 6 -o count -d -2
+                  | awk '$4>1'
+                  | bedtools subtract -a %(tmp1)s -b stdin
+                  | python %(scriptsdir)s/gtf2gtf.py
+                           --method=set-transcript-to-gene
+                           -L %(outfile)s.log
+                  | python %(scriptsdir)s/gtf2gtf.py
+                           --method=sort -L %(outfile)s.log
+                  | gzip > %(tmp2)s;
+
+                    checkpoint;
+
+                    rm %(tmp1)s'''
+
+    P.run()
+
+    # renumber exons as new exons have probably been created.
+    with IOTools.openFile(outfile, "w") as outf:
+        for transcript in GTF.transcript_iterator(
+                GTF.iterator(IOTools.openFile(tmp2))):
+            nexon = 0
+            for exon in transcript:
+                nexon += 1
+                exon = GTF.Entry().fromGTF(exon)
+                exon["exon_id"] = int(nexon)
+                outf.write(str(exon) + "\n")
+
+    os.unlink(tmp2)
+# -----------------------------------------------------------------
+@follows(mkdir("export"))
+@transform(filter_overlapping_genes, formatter(),
+           "export/{basename[0]}.gz")
+def export_chunks(infile, outfile):
+
+    statement = '''zcat %(infile)s
+                 | python %(scriptsdir)s/gtf2gtf.py
+                          --method=set-transcript-to-gene
+                           -L %(outfile)s.log
+                 | sort -k1,1 -k4,4n
+                 | bgzip > %(outfile)s;
+
+                 checkpoint;
+                
+                 tabix -p gff %(outfile)s'''
+
+    P.run()
+
 
 # -----------------------------------------------------------------
 if os.path.exists("design.tsv"):
@@ -417,10 +497,9 @@ if os.path.exists("design.tsv"):
                                 if re.match(f, pat1)]
             condition2_files = [(f, "control") for f in bamfiles
                                 if re.match(f, pat2)]
-            outlines = ["\t".join(l)
-                        for l in condition1_files + condition2_files]
             IOTools.writeLines("alt_utr_anlysis.dir/%s.design.tsv" % name,
-                               outlines)
+                               condition1_files + condition2_files,
+                                header=["track","condition"])
 
 else:
 
@@ -428,33 +507,32 @@ else:
     @collate("*.bam",
              regex("(.+)-((?!Control).+)-(.+).bam"),
              add_inputs(r"\1-Control-\3.bam"),
-             r"dapars_out.dir/\1-\2.dapars_config.txt")
-    def generate_dapars_config(infiles, outfile):
+             r"alt_utr_analysis.dir/\1-\2.design.txt")
+    def generate_dexseq_design_files(infiles, outfile):
 
         track = os.path.basename(infiles[0][0]).split("-")[0]
         files = [P.snip(os.path.basename(f), ".bam")
                  for p in infiles for f in p]
-        files = [(f, f.split("-")[0]) for f in files]
-        outlines = ["\t".join(l) for l in files]
-        IOTools.writeLines("alt_utr_analysis.dir/%s.design.tsv" % track,
-                           outlines)
+        files = [(f, f.split("-")[1]) for f in files]
+        IOTools.writeLines(outfile, files, header=["track","condition"])
 
 
 # -----------------------------------------------------------------
 @transform("*.bam", formatter(),
-           add_inputs(get_transcript_chunks),
-           "alt_utr_analysis.dir/{basename[0]}.tsv")
+           add_inputs(filter_overlapping_genes),
+           "alt_utr_analysis.dir/{basename[0]}.tsv.gz")
 def count_chunks(infiles, outfile):
 
-    gtffile = infiles[-1]
-    bamfile = infiles[:-1]
+    gtffile = infiles[1]
+    bamfile = infiles[0]
 
-    job_threads = 2
-    statement = '''featureCounts -f -O -a -T 2 --primary -p -B -C
-                                <(zcat %(gtffile)s)
-                                 %(bamfile)s
-                                -o %(outfile)s '''
-    P.run()
+    PipelineRnaseq.runFeatureCounts(
+        gtffile,
+        bamfile,
+        outfile,
+        job_threads=2,
+        strand=0,
+        options=' -f -O -T 2 --primary -p -B -C')
 
 
 # -----------------------------------------------------------------
@@ -463,7 +541,7 @@ def count_chunks(infiles, outfile):
 def merge_chunk_counts(infiles, outfile):
 
     infiles = " ".join(infiles)
-
+    job_memory = "10G"
     statement=''' python %(scriptsdir)s/combine_tables.py
                          -c 1,2,3,4,5,6
                          -k 7
@@ -478,8 +556,171 @@ def merge_chunk_counts(infiles, outfile):
 
 
 # -----------------------------------------------------------------
+@transform(generate_dexseq_design_files,
+           regex(".+/(.+).design.txt"),
+           add_inputs(merge_chunk_counts, filter_overlapping_genes),
+           r"alt_utr_analysis.dir/\1.dexseq.tsv")
+def run_dexseq(infiles, outfile):
+    '''run dexseq on the chunks'''
 
-@follows(loadDapars)
+    design, counts, models = infiles
+
+    infiles = ",".join([models, counts, design])
+    outfile = P.snip(outfile, ".tsv")
+
+    job_threads = 3
+    job_memory="10G"
+
+    pipeline_src = os.path.dirname(__file__)
+    script = os.path.join(pipeline_src, "run_dexseq_all.R")
+    statement = ''' Rscript %(script)s 
+                            --infiles %(infiles)s
+                            --outfiles %(outfile)s.tsv,%(outfile)s.gtf.gz,%(outfile)s.RData
+                             -p 3
+                    &> %(outfile)s.log '''
+
+    P.run()
+
+
+# -----------------------------------------------------------------
+@merge(run_dexseq,
+       "alt_utr_analysis.dir/dexseq_results.load")
+def load_dexseq(infiles, outfile):
+
+    P.concatenateAndLoad(infiles, outfile,
+                         regex_filename=".+/(.+).dexseq.tsv",
+                         options="-i groupID -i featureID -i track -i padj",
+                         job_memory="6G")
+
+
+@transform(load_dexseq, suffix(".load"), ".index")
+def joint_index_dexseq(infile, outfile):
+
+    db = connect()
+    db.executescript('''
+             DROP INDEX IF EXISTS dexseq_results_joint;
+             CREATE INDEX dexseq_results_joint
+                    ON dexseq_results(groupID,featureID);''')
+    P.touch(outfile)
+
+
+# -----------------------------------------------------------------
+@follows(joint_index_dexseq,
+         load_dexseq)
+def dexseq():
+    pass
+
+
+# -----------------------------------------------------------------
+@transform(os.path.join(
+    PARAMS["annotations_dir"],
+    PARAMS["annotations_interface_geneset_all_gtf"]),
+           formatter(),
+           "geneset.dir/last_exons.gtf.gz")
+def get_last_exons(infile, outfile):
+    '''identify exons that are the last exon in a transcript'''
+
+    from CGAT import GTF
+
+    gtfs = GTF.iterator(IOTools.openFile(infile))
+    outf = IOTools.openFile(outfile, "w")
+
+    for transcript in GTF.transcript_iterator(gtfs):
+        exons = [e for e in transcript
+                 if e.feature == "exon"]
+
+        if exons[0].strand == "+":
+            exons.sort(key=lambda x: x.end)
+        else:
+            exons.sort(key=lambda x: x.start, reverse=True)
+
+        last_exon = exons[-1]
+        outf.write(str(last_exon) + "\n")
+
+
+# -----------------------------------------------------------------
+@transform(get_last_exons,
+           suffix(".gtf.gz"),
+           add_inputs(get_transcript_chunks),
+           "_chunks.gtf.gz")
+def get_last_exon_chunks(infiles, outfile):
+    '''Overlap the last exons with the chunks to get
+    chunks that are from a last exon'''
+
+    last_exons, chunks = infiles
+
+    statement = '''bedtools intersect -u -a %(chunks)s -b %(last_exons)s -s
+                   | gzip > %(outfile)s'''
+
+    P.run()
+
+
+# -----------------------------------------------------------------
+@transform(get_last_exon_chunks, suffix(".gtf.gz"), ".load")
+def load_last_exon_chunks(infile, outfile):
+    '''Load gene and exon_ids for last exons into database'''
+
+    from CGAT import GTF
+    
+    with P.getTempFile(shared=True) as tmpfile:
+        tmpfile.write("gene_id\tchunk_id\n")
+        for exon in GTF.iterator(IOTools.openFile(infile)):
+            tmpfile.write("\t".join([exon.gene_id, exon["exon_id"]])+"\n")
+        tmpfn = tmpfile.name
+
+    P.load(tmpfn, outfile, options="-i gene_id -i exon_id")
+    os.unlink(tmpfn)
+
+
+# -----------------------------------------------------------------
+@transform(load_last_exon_chunks, suffix(".load"), ".index")
+def joint_index_on_last_exon_chunks(infile, outfile):
+    db = connect()
+    db.executescript('''
+             DROP INDEX IF EXISTS last_exon_chunks_joint;
+             CREATE INDEX last_exon_chunks_joint
+                    ON last_exons_chunks(gene_id,chunk_id);''')
+    P.touch(outfile)
+
+
+# -----------------------------------------------------------------
+@transform(run_dexseq,
+           formatter(),
+           inputs([r"alt_utr_analysis.dir/{basename[0]}.gtf.gz",
+                   get_last_exon_chunks]),
+           "alt_utr_analysis.dir/{basename[0]}.last_exons.gtf.gz")
+def export_diff_last_exons(infiles, outfile):
+    ''' Overlap the differential chunks with the last exon annotations.
+    also convert transcript name to gene name so that browsers arn't
+    confused'''
+
+    diff, chunks = infiles
+
+    statement = '''bedtools intersect -u -a %(chunks)s -b %(diff)s -s
+                 | python %(scriptsdir)s/gtf2gtf.py
+                         --method=set-gene-to-transcript
+                          -S %(outfile)s -L %(outfile)s.log'''
+
+    P.run()
+
+
+# -----------------------------------------------------------------
+@follows(export_diff_last_exons,
+         joint_index_on_last_exon_chunks)
+def last_exons():
+    pass
+
+
+# -----------------------------------------------------------------
+@follows(last_exons,
+         dexseq)
+def alt_utr_analysis():
+    pass
+
+
+# -----------------------------------------------------------------
+@follows(alt_utr_analysis,
+         dapars)
 def full():
     pass
 
