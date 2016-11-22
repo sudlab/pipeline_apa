@@ -21,12 +21,12 @@
 #   Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
 ###############################################################################
 """===========================
-Pipeline template
+Pipeline APA
 ===========================
 
 :Author: Ian Sudbery
-:Release: $Id$
-:Date: |today|
+:Release: 0.01
+:Date: 21/11/16
 :Tags: Python
 
 
@@ -116,6 +116,10 @@ Most of the output is in the sqlite database associated with the
 pipeline (csvdb by default). Also exported are the last exon chunks
 found to be differentially used by DEXSeq in the export directory.
 
+Diagram
+=======
+
+..image:: pipeline_diagram.png
 
  Glossary ========
 
