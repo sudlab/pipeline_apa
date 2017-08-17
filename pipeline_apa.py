@@ -208,9 +208,9 @@ def assembleWithStringTie(infiles, outfile):
 
 # -----------------------------------------------------------------
 @merge([assembleWithStringTie,
-        add_inputs(os.path.join(
+        os.path.join(
                PARAMS["annotations_dir"],
-               PARAMS["annotations_interface_geneset_all_gtf"]))],
+               PARAMS["annotations_interface_geneset_all_gtf"])],
        "geneset.dir/agg-agg-agg.gtf.gz")
 def mergeAllAssemblies(infiles, outfile):
 
@@ -251,8 +251,10 @@ def getGenesetBed12(infile, outfile):
 
 
 # -----------------------------------------------------------------
-@originate("transcripts_to_genes.txt")
-def generateDaParsTranscriptsToGenes(outfile):
+@transform(mergeAllAssemblies,
+           formatter(),
+           "transcripts_to_genes.txt")
+def generateDaParsTranscriptsToGenes(infile, outfile):
 
     import CGAT.GTF as GTF
 
@@ -260,13 +262,18 @@ def generateDaParsTranscriptsToGenes(outfile):
 
     for transcript in GTF.transcript_iterator(
             GTF.iterator(IOTools.openFile(infile))):
-        outlines.append([transcript[0].gene_id,
-                         transcript[0].transcript_id])
+        try:
+            gene_id = transcript[0].ref_gene_id
+        except AttributeError:
+            gene_id = transcript[0].gene_id
+            
+        outlines.append((transcript[0].transcript_id,
+                         gene_id))
 
     outlines = list(set(outlines))
 
     IOTools.writeLines(outfile, outlines,
-                       header=["gene_id", "transcript_id"])
+                       header=["#transcript_id", "gene_id"])
 
 
 # -----------------------------------------------------------------
@@ -406,7 +413,43 @@ def loadDapars(infiles, outfile):
 
 
 # ----------------------------------------------------------------
-@follows(loadDapars)
+@follows(mkdir("export"))
+@transform(mergeAllAssemblies,
+           formatter(),
+           [r"export/agg-agg-agg.gtf.gz",
+            r"export/agg-agg-agg.gtf.tbi"])
+def export_geneset(infile, outfiles):
+
+    gtffile, index = outfiles
+
+    statement = '''zcat %(infile)s
+                 | sort -k1,1 -k4,4n
+                 | bgzip > %(gtffile)s;
+     
+                 checkpoint;
+ 
+                 tabix %(gtffile)s -p gff'''
+    P.run()
+
+    
+# ----------------------------------------------------------------    
+@follows(mkdir("export"))
+@transform(bam_to_bedGraph,
+           formatter(),
+           add_inputs(PARAMS["annotations_interface_contigs_tsv"]),
+           r"export/{basename[0]}.bw")
+def export_bigwigs(infiles, outfile):
+
+    bedgraph, contigs = infiles
+    statement = '''bedGraphToBigWig %(bedgraph)s %(contigs)s 
+                                    %(outfile)s'''
+    P.run()
+
+
+# ----------------------------------------------------------------    
+@follows(loadDapars,
+         export_geneset,
+         export_bigwigs)
 def dapars():
     pass
 
@@ -614,12 +657,22 @@ def run_dexseq(infiles, outfile):
        "alt_utr_analysis.dir/dexseq_results.load")
 def load_dexseq(infiles, outfile):
 
+    statement = " checkpoint;".join(
+        [" sed 's/log2fold_\S+/log2fold/' %s > %s.tmp;" % (f, f)
+         for f in infiles])
+
+    P.run()
+
+    infiles = ["%s.tmp" % f for f in infiles]
     P.concatenateAndLoad(infiles, outfile,
-                         regex_filename=".+/(.+).dexseq.tsv",
+                         regex_filename=".+/(.+).dexseq.tsv.tmp",
                          options="-i groupID -i featureID -i track -i padj",
                          job_memory="6G")
 
+    for f in infiles:
+        os.unlink(f)
 
+        
 @transform(load_dexseq, suffix(".load"), ".index")
 def joint_index_dexseq(infile, outfile):
 
@@ -711,6 +764,7 @@ def joint_index_on_last_exon_chunks(infile, outfile):
 
 
 # -----------------------------------------------------------------
+@follows(mkdir("export"))
 @transform(run_dexseq,
            formatter(),
            inputs([r"alt_utr_analysis.dir/{basename[0]}.gtf.gz",
