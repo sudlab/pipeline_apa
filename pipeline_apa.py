@@ -183,6 +183,7 @@ def connect():
     return dbh
 
 # -----------------------------------------------------------------
+@active_if(PARAMS["build_geneset"] == 1)
 @follows(mkdir("geneset.dir"))
 @transform("*.bam", formatter(),
            add_inputs(os.path.join(
@@ -207,6 +208,7 @@ def assembleWithStringTie(infiles, outfile):
 
 
 # -----------------------------------------------------------------
+@active_if(PARAMS["build_geneset"] == 1)
 @merge([assembleWithStringTie,
         os.path.join(
                PARAMS["annotations_dir"],
@@ -235,7 +237,10 @@ def mergeAllAssemblies(infiles, outfile):
 
 
 # -----------------------------------------------------------------
-@transform(mergeAllAssemblies,
+@transform(mergeAllAssemblies if PARAMS["build_geneset"] == 1 else
+           os.path.join(
+               PARAMS["annotations_dir"],
+               PARAMS["annotations_interface_geneset_all_gtf"]),
            regex(".+"),
            "geneset.bed")
 def getGenesetBed12(infile, outfile):
@@ -251,7 +256,10 @@ def getGenesetBed12(infile, outfile):
 
 
 # -----------------------------------------------------------------
-@transform(mergeAllAssemblies,
+@transform(mergeAllAssemblies if PARAMS["build_geneset"] == 1 else
+           os.path.join(
+               PARAMS["annotations_dir"],
+               PARAMS["annotations_interface_geneset_all_gtf"]),
            formatter(),
            "transcripts_to_genes.txt")
 def generateDaParsTranscriptsToGenes(infile, outfile):
@@ -413,6 +421,7 @@ def loadDapars(infiles, outfile):
 
 
 # ----------------------------------------------------------------
+@active_if(PARAMS["build_geneset"] == 1)
 @follows(mkdir("export"))
 @transform(mergeAllAssemblies,
            formatter(),
