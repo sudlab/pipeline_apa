@@ -135,6 +135,7 @@ from ruffus import *
 import sys
 import os
 import sqlite3
+import re
 import CGAT.Experiment as E
 import CGATPipelines.Pipeline as P
 from CGATPipelines import PipelineRnaseq
@@ -730,7 +731,7 @@ def get_last_exons(infile, outfile):
 # -----------------------------------------------------------------
 @transform(get_last_exons,
            suffix(".gtf.gz"),
-           add_inputs(get_transcript_chunks),
+           add_inputs(filter_overlapping_genes),
            "_chunks.gtf.gz")
 def get_last_exon_chunks(infiles, outfile):
     '''Overlap the last exons with the chunks to get
@@ -754,7 +755,7 @@ def load_last_exon_chunks(infile, outfile):
     with P.getTempFile(shared=True) as tmpfile:
         tmpfile.write("gene_id\tchunk_id\n")
         for exon in GTF.iterator(IOTools.openFile(infile)):
-            tmpfile.write("\t".join([exon.gene_id, exon["exon_id"]])+"\n")
+            tmpfile.write("\t".join([exon.gene_id, re.sub(";","",exon["exon_id"])])+"\n")
         tmpfn = tmpfile.name
 
     P.load(tmpfn, outfile, options="-i gene_id -i exon_id")
