@@ -364,7 +364,7 @@ else:
            r"dapars_out.dir/\1/dapars_out.tsv_All_Prediction_Results.txt")
 def run_DaPars(infile, outfile):
 
-    job_memory = "6G"
+    job_memory = "16G"
     statement = '''DaPars_main.py %(infile)s > %(infile)s.log'''
     P.run(statement)   
     
