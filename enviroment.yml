@@ -1,0 +1,19 @@
+name: /home/mb1ims/.local/share/mamba/envs/pipeline_apa
+channels:
+  - bioconda
+  - conda-forge
+dependencies:
+  - cgat-apps
+  - cgatcore
+  - samtools
+  - bedtools
+  - bioconductor-dexseq
+  - scipy
+  - numpy
+  - sqlite
+  - stringtie
+  - r-optparse
+  - subread
+  - statsmodels
+  - bioconductor-rtracklayer
+prefix: /home/mb1ims/.local/share/mamba/envs/pipeline_apa
