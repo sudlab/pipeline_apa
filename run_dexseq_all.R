@@ -14,6 +14,7 @@ args = Experiment.start(opts)
 gffs <- import(args$infiles[1])
 
 col_data = read.delim(args$infile[3], header=T, row.names = 1)
+col_data$condition <- factor(col_data$condition)
 col_data$condition <- relevel(col_data$condition, "Control")
 rownames(col_data) <- gsub("-","_",rownames(col_data))
 
@@ -40,12 +41,15 @@ if (args$processes > 1) {
 }
 cat('# computing results\n')
 
-cat('#Subset results to only introns')
-dxd_results$padj <- p.adjust(dxd_results$pvalue, method="BH")
-sig_exons <- rownames(subset(dxd_results, padj < 0.05))
+cat('#Subset results to only introns\n')
+dxd_df <-as.data.frame(dxd_results)
+cat('# Adjusting pvalues \n')
+dxd_df$padj <- p.adjust(dxd_df$pvalue, method="BH")
+cat('# Susetting to significant')
+sig_exons <- rownames(subset(dxd_df, padj < 0.05))
 cat('# got', length(sig_exons), ' significant exons\n')
 sig_granges <- rowRanges(dxd[sig_exons,])
-dxd_df <-as.data.frame(dxd_results)
+
 cat('# outputting results')
 write.table(dxd_df[,1:15],args$outfiles[1],
             quote=F, sep = "\t", row.names=FALSE)

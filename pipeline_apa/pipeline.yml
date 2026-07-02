@@ -1,0 +1,34 @@
+
+projectname: CGATProject
+copyright: CGAT (2010-2014)
+version: "0.1"
+release: "0.1"
+genome: hg19
+build_geneset: 1
+
+database:
+  name: /shared/sudlab1/General/projects
+
+annotations:
+  geneset_gtf: /shared/sudlab1/General/projects/annotations/hg38_ensembl93/ensembl.dir/geneset_all.gtf.gz
+  contigs_tsv: /shared/sudlab1/General/projects/annotations/hg38_ensembl93/assembly.dir/contigs.tsv
+
+dapars:
+  num_least_in_group:
+  coverage_cutoff:
+  fdr_cutoff:
+  pdui_cutoff:
+  logfc_cutoff:
+
+stringtie:
+  threads: 4
+  memory: 4G
+  options: ""
+  merge_threads: 4
+  merge_options: ""
+  quant_threads: 2
+  quant_memory: 1
+  quant_options: ""
+
+report:
+  prefix: default
